@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2018, The Monero Project
+#Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
 #
@@ -104,6 +104,10 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 string(TOLOWER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_LOWER)
 
+# On Darwin, ensure the user-defined paths are used to find PCSC
+# before falling back to the system frameworks.
+set(CMAKE_FIND_FRAMEWORK "LAST")
+
 # ARCH defines the target architecture, either by an explicit identifier or
 # one of the following two keywords. By default, ARCH a value of 'native':
 # target arch = host arch, binary is not portable. When ARCH is set to the
@@ -175,19 +179,22 @@ endif()
 if(NOT MANUAL_SUBMODULES)
   find_package(Git)
   if(GIT_FOUND)
+    function (check_submodule relative_path)
+      execute_process(COMMAND git rev-parse "HEAD" WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${relative_path} OUTPUT_VARIABLE localHead)
+      execute_process(COMMAND git rev-parse "HEAD:${relative_path}" WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} OUTPUT_VARIABLE checkedHead)
+      string(COMPARE EQUAL "${localHead}" "${checkedHead}" upToDate)
+    #    if (upToDate)
+    #    message(STATUS "Submodule '${relative_path}' is up-to-date")
+    #  else()
+    #    message(FATAL_ERROR "Submodule '${relative_path}' is not up-to-date. Please update with\ngit submodule update --init --force ${relative_path}\nor run cmake with -DMANUAL_SUBMODULES=1")
+    #  endif()
+    endfunction ()
+    
     message(STATUS "Checking submodules")
-    execute_process(COMMAND bash -c "cd ${CMAKE_CURRENT_SOURCE_DIR}/external/miniupnp && git rev-parse HEAD" OUTPUT_VARIABLE miniupnpLocalHead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    execute_process(COMMAND bash -c "cd ${CMAKE_CURRENT_SOURCE_DIR}/external/unbound && git rev-parse HEAD" OUTPUT_VARIABLE unboundLocalHead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    execute_process(COMMAND bash -c "cd ${CMAKE_CURRENT_SOURCE_DIR}/external/rapidjson && git rev-parse HEAD" OUTPUT_VARIABLE rapidjsonLocalHead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    execute_process(COMMAND bash -c "git ls-tree HEAD ${CMAKE_CURRENT_SOURCE_DIR}/external/miniupnp | awk '{print $3}'" OUTPUT_VARIABLE miniupnpCheckedHead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    execute_process(COMMAND bash -c "git ls-tree HEAD ${CMAKE_CURRENT_SOURCE_DIR}/external/unbound | awk '{print $3}'" OUTPUT_VARIABLE unboundCheckedHead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    execute_process(COMMAND bash -c "git ls-tree HEAD ${CMAKE_CURRENT_SOURCE_DIR}/external/rapidjson | awk '{print $3}'" OUTPUT_VARIABLE rapidjsonCheckedHead WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-    string(COMPARE EQUAL "${miniupnpLocalHead}" "${miniupnpCheckedHead}" miniupnpUpToDate)
-    string(COMPARE EQUAL "${unboundLocalHead}" "${unboundCheckedHead}" unboundUpToDate)
-    string(COMPARE EQUAL "${rapidjsonLocalHead}" "${rapidjsonCheckedHead}" rapidjsonUpToDate)
-    if (NOT miniupnpUpToDate OR NOT unboundUpToDate OR NOT rapidjsonUpToDate)
-      message(FATAL_ERROR "Submodules not up to date. Please update with git submodule init && git submodule update, or run cmake with -DMANUAL_SUBMODULES=1")
-    endif()
+    check_submodule(external/miniupnp)
+    check_submodule(external/unbound)
+    check_submodule(external/rapidjson)
+    check_submodule(external/trezor-common)
   endif()
 endif()
 
@@ -199,6 +206,9 @@ set(PER_BLOCK_CHECKPOINT 1)
 
 if(PER_BLOCK_CHECKPOINT)
   add_definitions("-DPER_BLOCK_CHECKPOINT")
+  set(Blocks "blocks")
+else()
+  set(Blocks "")
 endif()
 
 list(INSERT CMAKE_MODULE_PATH 0
@@ -428,6 +438,8 @@ if (UNIX AND NOT APPLE)
   # Note that at the time of this writing the -Wstrict-prototypes flag added below will make this fail
   set(THREADS_PREFER_PTHREAD_FLAG ON)
   find_package(Threads)
+  add_c_flag_if_supported(-pthread CMAKE_C_FLAGS)
+  add_cxx_flag_if_supported(-pthread CMAKE_CXX_FLAGS)
 endif()
 
 # Handle OpenSSL, used for sha256sum on binary updates and light wallet ssl http
@@ -503,6 +515,16 @@ if (HIDAPI_FOUND)
   link_directories(${LIBHIDAPI_LIBRARY_DIRS})
 else (HIDAPI_FOUND)
   message(STATUS "Could not find HIDAPI")
+endif()
+
+# Protobuf, optional. Required for TREZOR.
+include(FindProtobuf)
+find_package(Protobuf)
+if(Protobuf_FOUND)
+  set(HAVE_PROTOBUF 1)
+  add_definitions(-DHAVE_PROTOBUF=1)
+else(Protobuf_FOUND)
+  message(STATUS "Could not find Protobuf")
 endif()
 
 if(MSVC)
@@ -672,12 +694,10 @@ else()
   add_linker_flag_if_supported(-Wl,-z,noexecstack noexecstack_SUPPORTED)
   if (noexecstack_SUPPORTED)
     set(LD_SECURITY_FLAGS "${LD_SECURITY_FLAGS} -Wl,-z,noexecstack")
-    set(LD_RAW_FLAGS ${LD_RAW_FLAGS} -z noexecstack)
   endif()
   add_linker_flag_if_supported(-Wl,-z,noexecheap noexecheap_SUPPORTED)
   if (noexecheap_SUPPORTED)
     set(LD_SECURITY_FLAGS "${LD_SECURITY_FLAGS} -Wl,-z,noexecheap")
-    set(LD_RAW_FLAGS ${LD_RAW_FLAGS} -z noexecheap)
   endif()
 
   # some windows linker bits
@@ -880,7 +900,7 @@ endif()
 include_directories(SYSTEM ${Boost_INCLUDE_DIRS})
 if(MINGW)
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wa,-mbig-obj")
-  set(EXTRA_LIBRARIES mswsock;ws2_32;iphlpapi;crypt32)
+  set(EXTRA_LIBRARIES mswsock;ws2_32;iphlpapi;crypt32;bcrypt)
   if(DEPENDS)
     set(ICU_LIBRARIES ${Boost_LOCALE_LIBRARY} sicuio sicuin sicuuc sicudt sicutu iconv)
   else()
@@ -937,7 +957,9 @@ if(ANDROID)
 endif()
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND ARCH_WIDTH EQUAL "32" AND NOT IOS AND NOT FREEBSD)
   find_library(ATOMIC atomic)
-  list(APPEND EXTRA_LIBRARIES ${ATOMIC})
+  if (ATOMIC_FOUND)
+    list(APPEND EXTRA_LIBRARIES ${ATOMIC})
+  endif()
 endif()
 
 find_path(ZMQ_INCLUDE_PATH zmq.hpp)
@@ -966,7 +988,7 @@ add_subdirectory(contrib)
 add_subdirectory(src)
 
 if(BUILD_TESTS)
-  add_subdirectory(tests)
+  # add_subdirectory(tests)
 endif()
 
 if(BUILD_DOCUMENTATION)
